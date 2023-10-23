@@ -193,10 +193,7 @@ class CapitalGainsCalculator:
             new_balance = balance[(transaction.broker, transaction.currency)]
             if transaction.action is ActionType.TRANSFER:
                 new_balance += get_amount_or_fail(transaction)
-            elif transaction.action in [
-                ActionType.BUY,
-                ActionType.REINVEST_SHARES,
-            ]:
+            elif transaction.action is ActionType.BUY:
                 new_balance += get_amount_or_fail(transaction)
                 self.add_acquisition(portfolio, acquisition_list, transaction)
             elif transaction.action is ActionType.SELL:
@@ -224,6 +221,7 @@ class CapitalGainsCalculator:
             elif transaction.action in [
                 ActionType.STOCK_ACTIVITY,
                 ActionType.SPIN_OFF,
+                ActionType.REINVEST_SHARES,
                 ActionType.STOCK_SPLIT,
             ]:
                 self.add_acquisition(portfolio, acquisition_list, transaction)
@@ -433,11 +431,7 @@ class CapitalGainsCalculator:
                             _same_day_amount,
                             _same_day_fees,
                         ) = astuple(disposal_list[search_index][symbol])
-                    if same_day_quantity > acquisition_quantity:
-                        # If the number of shares disposed of exceeds the number
-                        # acquired on the same day the excess shares will be identified
-                        # in the normal way.
-                        continue
+                    assert same_day_quantity <= acquisition_quantity
 
                     # This can be some management fee entry or already used
                     # by bed and breakfast rule
@@ -683,6 +677,7 @@ def main() -> int:
         args.mssb,
         args.sharesight,
         args.raw,
+        args.csv,
     )
     converter = CurrencyConverter(args.exchange_rates_file)
     initial_prices = InitialPrices(read_initial_prices(args.initial_prices))

@@ -70,6 +70,12 @@ def create_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="folder containing reports from Sharesight in CSV format",
     )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        nargs="?",
+        help="file containing reports in a custom CSV format.",
+    )
 
     parser.add_argument(
         "--exchange-rates-file",
