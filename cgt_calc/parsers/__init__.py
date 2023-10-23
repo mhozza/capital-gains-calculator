@@ -13,6 +13,7 @@ from cgt_calc.exceptions import UnexpectedColumnCountError
 from cgt_calc.model import BrokerTransaction
 from cgt_calc.resources import RESOURCES_PACKAGE
 
+from .custom_csv import read_custom_csv_transactions
 from .mssb import read_mssb_transactions
 from .schwab import read_schwab_transactions
 from .schwab_equity_award_json import read_schwab_equity_award_json_transactions
@@ -49,6 +50,7 @@ def read_broker_transactions(
     trading212_transactions_folder: str | None,
     mssb_transactions_folder: str | None,
     sharesight_transactions_folder: str | None,
+    custom_csv_file: str | None,
 ) -> list[BrokerTransaction]:
     """Read transactions for all brokers."""
     transactions = []
@@ -80,6 +82,11 @@ def read_broker_transactions(
         transactions += read_sharesight_transactions(sharesight_transactions_folder)
     else:
         print("INFO: No sharesight file provided")
+
+    if custom_csv_file is not None:
+        transactions += read_custom_csv_transactions(custom_csv_file)
+    else:
+        print("INFO: No custom CSV file provided")
 
     transactions.sort(key=operator.attrgetter("date"))
     return transactions
