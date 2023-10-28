@@ -33,6 +33,7 @@ COLUMNS: Final[list[str]] = [
 
 TYPE_SALE = "Sale"
 TYPE_RELEASE = "Release"
+TYPE_GIFT = "Gift"
 
 # These can be potentially wired through as a flag
 KNOWN_SYMBOL_DICT: Final[dict[str, str]] = {
@@ -42,7 +43,7 @@ KNOWN_SYMBOL_DICT: Final[dict[str, str]] = {
 
 
 def _hacky_parse_decimal(decimal: str) -> Decimal:
-    return Decimal(decimal.replace(",", ""))
+    return Decimal(decimal.replace(",", "").replace("$", ""))
 
 
 def _parse_header(
@@ -72,26 +73,30 @@ def _associate_row(row: list[str], header: dict[int, str]) -> dict[str, str]:
 
 
 def _parse_row(row: dict[str, str], file: str) -> BrokerTransaction:
-    trasnaction_type = row[COL_TYPE]
+    transaction_type = row[COL_TYPE]
 
-    raw_price = row[COL_PRICE]
-    if raw_price[0] == "$":
-        raw_price = raw_price[1:]
-    price = _hacky_parse_decimal(raw_price)
-
+    price = None
     action = None
     amount = None
     quantity = None
-    if trasnaction_type == TYPE_RELEASE:
+    fees = Decimal(0)
+    if transaction_type == TYPE_RELEASE:
+        price = _hacky_parse_decimal(row[COL_PRICE])
         action = ActionType.STOCK_ACTIVITY
         quantity = _hacky_parse_decimal(row[COL_SHARE_PROCEEDS])
         amount = quantity * price
-    elif trasnaction_type == TYPE_SALE:
+    elif transaction_type == TYPE_SALE:
+        price = _hacky_parse_decimal(row[COL_PRICE])
         action = ActionType.SELL
         quantity = _hacky_parse_decimal(row[COL_QUANTITY])
-        amount = quantity * price
+        amount = _hacky_parse_decimal(row[COL_CASH_PROCEEDS])
+        fees = quantity * price - amount
+    elif transaction_type == TYPE_GIFT:
+        action = ActionType.GIFT
+        quantity = _hacky_parse_decimal(row[COL_QUANTITY])
+        price = None
     else:
-        msg = f"Unknown trasnaction_type: {trasnaction_type}."
+        msg = f"Unknown transaction_type: {transaction_type}."
         raise ParsingError(msg, file)
 
     symbol = KNOWN_SYMBOL_DICT[row[COL_PLAN]]
@@ -104,7 +109,7 @@ def _parse_row(row: dict[str, str], file: str) -> BrokerTransaction:
         description=row[COL_PLAN],
         quantity=quantity,
         price=price,
-        fees=Decimal(0),
+        fees=fees,
         amount=amount,
         currency="USD",
         broker="",

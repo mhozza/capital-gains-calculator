@@ -29,15 +29,22 @@ from .exceptions import (
 from .initial_prices import InitialPrices
 from .model import (
     ActionType,
+    AquisitionHmrcTransactionLog,
     BrokerTransaction,
     CalculationEntry,
     CalculationLog,
     CapitalGainsReport,
-    HmrcTransactionLog,
+    DisposalHmrcTransactionLog,
+    DisposalType,
     RuleType,
 )
 from .parsers import read_broker_transactions, read_initial_prices
-from .transaction_log import add_to_list, has_key
+from .transaction_log import (
+    add_to_aquisition_list,
+    add_to_disposal_list,
+    has_aquisition_key,
+    has_disposal_key,
+)
 from .util import round_decimal
 
 LOGGER = logging.getLogger(__name__)
@@ -85,7 +92,7 @@ class CapitalGainsCalculator:
     def add_acquisition(
         self,
         portfolio: dict[str, Decimal],
-        acquisition_list: HmrcTransactionLog,
+        acquisition_list: AquisitionHmrcTransactionLog,
         transaction: BrokerTransaction,
     ) -> None:
         """Add new acquisition to the given list."""
@@ -120,7 +127,7 @@ class CapitalGainsCalculator:
                 raise CalculatedAmountDiscrepancyError(transaction, -calculated_amount)
             amount = -amount
 
-        add_to_list(
+        add_to_aquisition_list(
             acquisition_list,
             transaction.date,
             symbol,
@@ -132,7 +139,7 @@ class CapitalGainsCalculator:
     def add_disposal(
         self,
         portfolio: dict[str, Decimal],
-        disposal_list: HmrcTransactionLog,
+        disposal_list: DisposalHmrcTransactionLog,
         transaction: BrokerTransaction,
     ) -> None:
         """Add new disposal to the given list."""
@@ -157,27 +164,39 @@ class CapitalGainsCalculator:
             del portfolio[symbol]
         # Add to disposal_list to apply same day rule
 
-        amount = get_amount_or_fail(transaction)
-        price = transaction.price
+        if transaction.action is ActionType.GIFT:
+            add_to_disposal_list(
+                disposal_list,
+                transaction.date,
+                symbol,
+                quantity,
+                Decimal(0),
+                Decimal(0),
+                DisposalType.GIFT,
+            )
+        else:
+            amount = get_amount_or_fail(transaction)
+            price = transaction.price
 
-        if price is None:
-            raise PriceMissingError(transaction)
-        calculated_amount = quantity * price - transaction.fees
-        if not _approx_equal(amount, calculated_amount):
-            raise CalculatedAmountDiscrepancyError(transaction, calculated_amount)
-        add_to_list(
-            disposal_list,
-            transaction.date,
-            symbol,
-            quantity,
-            self.converter.to_gbp_for(amount, transaction),
-            self.converter.to_gbp_for(transaction.fees, transaction),
-        )
+            if price is None:
+                raise PriceMissingError(transaction)
+            calculated_amount = quantity * price - transaction.fees
+            if not _approx_equal(amount, calculated_amount):
+                raise CalculatedAmountDiscrepancyError(transaction, calculated_amount)
+            add_to_disposal_list(
+                disposal_list,
+                transaction.date,
+                symbol,
+                quantity,
+                self.converter.to_gbp_for(amount, transaction),
+                self.converter.to_gbp_for(transaction.fees, transaction),
+                DisposalType.SELL,
+            )
 
     def convert_to_hmrc_transactions(
         self,
         transactions: list[BrokerTransaction],
-    ) -> tuple[HmrcTransactionLog, HmrcTransactionLog]:
+    ) -> tuple[AquisitionHmrcTransactionLog, DisposalHmrcTransactionLog]:
         """Convert broker transactions to HMRC transactions."""
         # We keep a balance per broker,currency pair
         balance: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal(0))
@@ -186,9 +205,10 @@ class CapitalGainsCalculator:
         interest = Decimal(0)
         total_sells = Decimal(0)
         portfolio: dict[str, Decimal] = {}
-        acquisition_list: HmrcTransactionLog = {}
-        disposal_list: HmrcTransactionLog = {}
+        acquisition_list: AquisitionHmrcTransactionLog = {}
+        disposal_list: DisposalHmrcTransactionLog = {}
 
+        LOGGER.debug("Processing transactions...")
         for i, transaction in enumerate(transactions):
             new_balance = balance[(transaction.broker, transaction.currency)]
             if transaction.action is ActionType.TRANSFER:
@@ -210,7 +230,7 @@ class CapitalGainsCalculator:
                 gbp_fees = self.converter.to_gbp_for(transaction.fees, transaction)
                 if transaction.symbol is None:
                     raise SymbolMissingError(transaction)
-                add_to_list(
+                add_to_aquisition_list(
                     acquisition_list,
                     transaction.date,
                     transaction.symbol,
@@ -225,6 +245,8 @@ class CapitalGainsCalculator:
                 ActionType.STOCK_SPLIT,
             ]:
                 self.add_acquisition(portfolio, acquisition_list, transaction)
+            elif transaction.action is ActionType.GIFT:
+                self.add_disposal(portfolio, disposal_list, transaction)
             elif transaction.action in [ActionType.DIVIDEND, ActionType.CAPITAL_GAIN]:
                 amount = get_amount_or_fail(transaction)
                 new_balance += amount
@@ -272,8 +294,8 @@ class CapitalGainsCalculator:
 
     @staticmethod
     def process_acquisition(
-        acquisition_list: HmrcTransactionLog,
-        bed_and_breakfast_list: HmrcTransactionLog,
+        acquisition_list: AquisitionHmrcTransactionLog,
+        bed_and_breakfast_list: AquisitionHmrcTransactionLog,
         portfolio: dict[str, tuple[Decimal, Decimal]],
         symbol: str,
         date_index: datetime.date,
@@ -297,7 +319,7 @@ class CapitalGainsCalculator:
         bed_and_breakfast_fees = Decimal(0)
         if acquisition_quantity > 0:
             acquisition_price = acquisition_amount / acquisition_quantity
-            if has_key(bed_and_breakfast_list, date_index, symbol):
+            if has_aquisition_key(bed_and_breakfast_list, date_index, symbol):
                 (
                     bed_and_breakfast_quantity,
                     bed_and_breakfast_amount,
@@ -344,33 +366,40 @@ class CapitalGainsCalculator:
 
     @staticmethod
     def process_disposal(
-        acquisition_list: HmrcTransactionLog,
-        disposal_list: HmrcTransactionLog,
-        bed_and_breakfast_list: HmrcTransactionLog,
+        acquisition_list: AquisitionHmrcTransactionLog,
+        disposal_list: DisposalHmrcTransactionLog,
+        bed_and_breakfast_list: AquisitionHmrcTransactionLog,
         portfolio: dict[str, tuple[Decimal, Decimal]],
         symbol: str,
         date_index: datetime.date,
+        disposal_type: DisposalType,
     ) -> tuple[Decimal, list[CalculationEntry]]:
         """Process single disposal."""
+        current_quantity, current_amount = portfolio[symbol]
+        chargeable_gain = Decimal(0)
+        calculation_entries = []
+
         disposal_quantity, proceeds_amount, disposal_fees = astuple(
-            disposal_list[date_index][symbol]
+            disposal_list[date_index][symbol][disposal_type]
         )
         original_disposal_quantity = disposal_quantity
         disposal_price = proceeds_amount / disposal_quantity
-        current_quantity, current_amount = portfolio[symbol]
         assert disposal_quantity <= current_quantity
-        chargeable_gain = Decimal(0)
-        calculation_entries = []
+
         # Same day rule is first
-        if has_key(acquisition_list, date_index, symbol):
+        if has_aquisition_key(acquisition_list, date_index, symbol):
             same_day_quantity, same_day_amount, _same_day_fees = astuple(
                 acquisition_list[date_index][symbol]
             )
             available_quantity = min(disposal_quantity, same_day_quantity)
             if available_quantity > 0:
                 acquisition_price = same_day_amount / same_day_quantity
-                same_day_proceeds = available_quantity * disposal_price
                 same_day_allowable_cost = available_quantity * acquisition_price
+                same_day_proceeds = (
+                    same_day_allowable_cost
+                    if disposal_type is DisposalType.GIFT
+                    else available_quantity * disposal_price
+                )
                 same_day_gain = same_day_proceeds - same_day_allowable_cost
                 chargeable_gain += same_day_gain
                 LOGGER.debug(
@@ -382,7 +411,8 @@ class CapitalGainsCalculator:
                     acquisition_price,
                 )
                 disposal_quantity -= available_quantity
-                proceeds_amount -= available_quantity * disposal_price
+                if disposal_type is DisposalType.SELL:
+                    proceeds_amount -= same_day_proceeds
                 current_quantity -= available_quantity
                 # These shares shouldn't be added to Section 104 holding
                 current_amount -= available_quantity * acquisition_price
@@ -408,7 +438,7 @@ class CapitalGainsCalculator:
         if disposal_quantity > 0:
             for i in range(BED_AND_BREAKFAST_DAYS):
                 search_index = date_index + datetime.timedelta(days=i + 1)
-                if has_key(acquisition_list, search_index, symbol):
+                if has_aquisition_key(acquisition_list, search_index, symbol):
                     (
                         acquisition_quantity,
                         acquisition_amount,
@@ -416,7 +446,7 @@ class CapitalGainsCalculator:
                     ) = astuple(acquisition_list[search_index][symbol])
 
                     bed_and_breakfast_quantity = Decimal(0)
-                    if has_key(bed_and_breakfast_list, search_index, symbol):
+                    if has_aquisition_key(bed_and_breakfast_list, search_index, symbol):
                         (
                             bed_and_breakfast_quantity,
                             _bb_amount,
@@ -425,13 +455,19 @@ class CapitalGainsCalculator:
                     assert bed_and_breakfast_quantity <= acquisition_quantity
 
                     same_day_quantity = Decimal(0)
-                    if has_key(disposal_list, search_index, symbol):
+                    if has_disposal_key(
+                        disposal_list, search_index, symbol, disposal_type
+                    ):
                         (
                             same_day_quantity,
                             _same_day_amount,
                             _same_day_fees,
-                        ) = astuple(disposal_list[search_index][symbol])
-                    assert same_day_quantity <= acquisition_quantity
+                        ) = astuple(disposal_list[search_index][symbol][disposal_type])
+                    if same_day_quantity > acquisition_quantity:
+                        # If the number of shares disposed of exceeds the number
+                        # acquired on the same day the excess shares will be identified
+                        # in the normal way.
+                        continue
 
                     # This can be some management fee entry or already used
                     # by bed and breakfast rule
@@ -454,9 +490,13 @@ class CapitalGainsCalculator:
                         - bed_and_breakfast_quantity,
                     )
                     acquisition_price = acquisition_amount / acquisition_quantity
-                    bed_and_breakfast_proceeds = available_quantity * disposal_price
                     bed_and_breakfast_allowable_cost = (
                         available_quantity * acquisition_price
+                    )
+                    bed_and_breakfast_proceeds = (
+                        bed_and_breakfast_allowable_cost
+                        if disposal_type is DisposalType.GIFT
+                        else available_quantity * disposal_price
                     )
                     bed_and_breakfast_gain = (
                         bed_and_breakfast_proceeds - bed_and_breakfast_allowable_cost
@@ -471,7 +511,8 @@ class CapitalGainsCalculator:
                         acquisition_price,
                     )
                     disposal_quantity -= available_quantity
-                    proceeds_amount -= available_quantity * disposal_price
+                    if disposal_type is DisposalType.SELL:
+                        proceeds_amount -= bed_and_breakfast_proceeds
                     current_price = current_amount / current_quantity
                     amount_delta = available_quantity * current_price
                     current_quantity -= available_quantity
@@ -480,7 +521,7 @@ class CapitalGainsCalculator:
                         assert (
                             round_decimal(current_amount, 23) == 0
                         ), f"current amount {current_amount}"
-                    add_to_list(
+                    add_to_aquisition_list(
                         bed_and_breakfast_list,
                         search_index,
                         symbol,
@@ -506,6 +547,8 @@ class CapitalGainsCalculator:
                     )
         if disposal_quantity > 0:
             allowable_cost = current_amount * disposal_quantity / current_quantity
+            if disposal_type is DisposalType.GIFT:
+                proceeds_amount = allowable_cost
             chargeable_gain += proceeds_amount - allowable_cost
             LOGGER.debug(
                 "SECTION 104, quantity %d, gain %s, proceeds amount %s, "
@@ -545,8 +588,8 @@ class CapitalGainsCalculator:
 
     def calculate_capital_gain(
         self,
-        acquisition_list: HmrcTransactionLog,
-        disposal_list: HmrcTransactionLog,
+        acquisition_list: AquisitionHmrcTransactionLog,
+        disposal_list: DisposalHmrcTransactionLog,
     ) -> CapitalGainsReport:
         """Calculate capital gain and return generated report."""
         begin_index = INTERNAL_START_DATE
@@ -557,10 +600,12 @@ class CapitalGainsCalculator:
         allowable_costs = Decimal(0)
         capital_gain = Decimal(0)
         capital_loss = Decimal(0)
-        bed_and_breakfast_list: HmrcTransactionLog = {}
+        bed_and_breakfast_list: AquisitionHmrcTransactionLog = {}
         portfolio: dict[str, tuple[Decimal, Decimal]] = {}
         calculation_log: CalculationLog = {}
-        for date_index in (
+        for (  # pylint: disable=too-many-nested-blocks, fixme. # TODO: Refactor.
+            date_index
+        ) in (
             begin_index + datetime.timedelta(days=x)
             for x in range(0, (end_index - begin_index).days + 1)
         ):
@@ -581,61 +626,65 @@ class CapitalGainsCalculator:
                         ] = calculation_entries
             if date_index in disposal_list:
                 for symbol in disposal_list[date_index]:
-                    (
-                        transaction_capital_gain,
-                        calculation_entries,
-                    ) = self.process_disposal(
-                        acquisition_list,
-                        disposal_list,
-                        bed_and_breakfast_list,
-                        portfolio,
-                        symbol,
-                        date_index,
-                    )
-                    if date_index >= tax_year_start_index:
-                        disposal_count += 1
-                        transaction_disposal_proceeds = disposal_list[date_index][
-                            symbol
-                        ].amount
-                        disposal_proceeds += transaction_disposal_proceeds
-                        allowable_costs += (
-                            transaction_disposal_proceeds - transaction_capital_gain
-                        )
-                        transaction_quantity = disposal_list[date_index][
-                            symbol
-                        ].quantity
-                        LOGGER.debug(
-                            "DISPOSAL on %s of %s, quantity %d, capital gain $%s",
-                            date_index,
+                    for disposal_type in disposal_list[date_index][symbol]:
+                        (
+                            transaction_capital_gain,
+                            calculation_entries,
+                        ) = self.process_disposal(
+                            acquisition_list,
+                            disposal_list,
+                            bed_and_breakfast_list,
+                            portfolio,
                             symbol,
-                            transaction_quantity,
-                            round_decimal(transaction_capital_gain, 2),
+                            date_index,
+                            disposal_type,
                         )
-                        calculated_quantity = Decimal(0)
-                        calculated_proceeds = Decimal(0)
-                        calculated_gain = Decimal(0)
-                        for entry in calculation_entries:
-                            calculated_quantity += entry.quantity
-                            calculated_proceeds += entry.amount
-                            calculated_gain += entry.gain
-                        assert transaction_quantity == calculated_quantity
-                        assert round_decimal(
-                            transaction_disposal_proceeds, 10
-                        ) == round_decimal(
-                            calculated_proceeds, 10
-                        ), f"{transaction_disposal_proceeds} != {calculated_proceeds}"
-                        assert transaction_capital_gain == round_decimal(
-                            calculated_gain, 2
-                        )
-                        if date_index not in calculation_log:
-                            calculation_log[date_index] = {}
-                        calculation_log[date_index][
-                            f"sell${symbol}"
-                        ] = calculation_entries
-                        if transaction_capital_gain > 0:
-                            capital_gain += transaction_capital_gain
-                        else:
-                            capital_loss += transaction_capital_gain
+                        if date_index >= tax_year_start_index:
+                            disposal_count += 1
+                            transaction_disposal_proceeds = disposal_list[date_index][
+                                symbol
+                            ][disposal_type].amount
+                            disposal_proceeds += transaction_disposal_proceeds
+                            allowable_costs += (
+                                transaction_disposal_proceeds - transaction_capital_gain
+                            )
+                            transaction_quantity = disposal_list[date_index][symbol][
+                                disposal_type
+                            ].quantity
+                            LOGGER.debug(
+                                "DISPOSAL on %s of %s, quantity %d, capital gain $%s",
+                                date_index,
+                                symbol,
+                                transaction_quantity,
+                                round_decimal(transaction_capital_gain, 2),
+                            )
+                            if disposal_type == DisposalType.SELL:
+                                calculated_quantity = Decimal(0)
+                                calculated_proceeds = Decimal(0)
+                                calculated_gain = Decimal(0)
+                                for entry in calculation_entries:
+                                    calculated_quantity += entry.quantity
+                                    calculated_proceeds += entry.amount
+                                    calculated_gain += entry.gain
+                                assert transaction_quantity == calculated_quantity
+                                assert round_decimal(
+                                    transaction_disposal_proceeds, 10
+                                ) == round_decimal(calculated_proceeds, 10), (
+                                    f"{transaction_disposal_proceeds}"
+                                    f" != {calculated_proceeds}"
+                                )
+                                assert transaction_capital_gain == round_decimal(
+                                    calculated_gain, 2
+                                )
+                            if date_index not in calculation_log:
+                                calculation_log[date_index] = {}
+                            calculation_log[date_index][
+                                f"{disposal_type.name.lower()}${symbol}"
+                            ] = calculation_entries
+                            if transaction_capital_gain > 0:
+                                capital_gain += transaction_capital_gain
+                            else:
+                                capital_loss += transaction_capital_gain
         print("\nSecond pass completed")
         allowance = CAPITAL_GAIN_ALLOWANCES.get(self.tax_year)
         return CapitalGainsReport(
@@ -690,9 +739,10 @@ def main() -> int:
     # same type within the same day.
     # It also converts prices to GBP, validates data and calculates dividends,
     # taxes on dividends and interest.
-    acquisition_list, disposal_list = calculator.convert_to_hmrc_transactions(
-        broker_transactions
-    )
+    (
+        acquisition_list,
+        disposal_list,
+    ) = calculator.convert_to_hmrc_transactions(broker_transactions)
     # Second pass calculates capital gain tax for the given tax year.
     report = calculator.calculate_capital_gain(acquisition_list, disposal_list)
     print(report)

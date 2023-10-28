@@ -21,7 +21,19 @@ class HmrcTransactionData:
 
 
 # For mapping of dates to int
-HmrcTransactionLog = Dict[datetime.date, Dict[str, HmrcTransactionData]]
+class DisposalType(Enum):
+    """Type of disposal."""
+
+    SELL = 1
+    GIFT = 2
+
+
+AquisitionHmrcTransactionLog = Dict[datetime.date, Dict[str, HmrcTransactionData]]
+
+
+DisposalHmrcTransactionLog = Dict[
+    datetime.date, Dict[str, Dict[DisposalType, HmrcTransactionData]]
+]
 
 
 class ActionType(Enum):
@@ -42,6 +54,7 @@ class ActionType(Enum):
     REINVEST_DIVIDENDS = 13
     WIRE_FUNDS_RECEIVED = 14
     STOCK_SPLIT = 15
+    GIFT = 16
 
 
 @dataclass
@@ -73,6 +86,7 @@ class CalculationEntry:  # noqa: SIM119 # this has non-trivial constructor
 
     def __init__(
         self,
+        # disposal_type: DisposalType,
         rule_type: RuleType,
         quantity: Decimal,
         amount: Decimal,
@@ -84,6 +98,7 @@ class CalculationEntry:  # noqa: SIM119 # this has non-trivial constructor
         bed_and_breakfast_date_index: datetime.date | None = None,
     ):
         """Create calculation entry."""
+        # self.disposal_type = disposal_type
         self.rule_type = rule_type
         self.quantity = quantity
         self.amount = amount

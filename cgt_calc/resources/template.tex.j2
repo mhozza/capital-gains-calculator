@@ -17,6 +17,11 @@
 \BLOCK{ if symbol.startswith("sell$") }
     \BLOCK{ set symbol = symbol[5:] }
     \BLOCK{ set is_disposal = True }
+    \BLOCK{ set is_gift = False }
+\BLOCK{ elif symbol.startswith("gift$") }
+    \BLOCK{ set symbol = symbol[5:] }
+    \BLOCK{ set is_disposal = True }
+    \BLOCK{ set is_gift = True }
 \BLOCK{ else }
     \BLOCK{ set symbol = symbol[4:] }
     \BLOCK{ set is_disposal = False }
@@ -28,7 +33,11 @@
     \BLOCK{ set overall_gain = round_decimal(entries|sum(attribute="gain"), 2) }
     \BLOCK{ set disposal_count.value = disposal_count.value + 1 }
     \subsection*{
-        Disposal \VAR{ disposal_count.value }: \VAR{ strip_zeros(overall_quantity) } units of \VAR{ symbol } for £\VAR{ "{:,}".format(overall_disposed) }
+        \BLOCK{ if is_gift }
+            Gift \VAR{ disposal_count.value }: \VAR{ strip_zeros(overall_quantity) } units of \VAR{ symbol }
+        \BLOCK{ else }
+            Disposal \VAR{ disposal_count.value }: \VAR{ strip_zeros(overall_quantity) } units of \VAR{ symbol } for £\VAR{ "{:,}".format(overall_disposed) }
+        \BLOCK{ endif }
         (£\VAR{ "{:,}".format(round_decimal(overall_disposed/overall_quantity, 2)) }/unit)%
         \BLOCK{ if overall_fees > 0 }
             , after £\VAR{ "{:,}".format(overall_fees) } fees
