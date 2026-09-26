@@ -1,5 +1,6 @@
 """Test Schwab parser."""
 
+from collections.abc import Generator
 import datetime
 from decimal import Decimal
 import io
@@ -9,7 +10,12 @@ import pytest
 
 from cgt_calc.exceptions import ParsingError, SymbolMissingError
 from cgt_calc.model import ActionType, BrokerTransaction
-from cgt_calc.parsers.schwab import AwardPrices, SchwabParser, action_from_str
+from cgt_calc.parsers.schwab import (
+    AwardPrices,
+    JournaledSharesBaseCosts,
+    SchwabParser,
+    action_from_str,
+)
 from tests.schwab.helpers import load_via_cli
 from tests.utils import (
     assert_stdout_matches,
@@ -18,6 +24,15 @@ from tests.utils import (
     run_cli,
     stderr_alerts,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_schwab_journaled_shares() -> Generator[None, None, None]:
+    SchwabParser.reset_journaled_shares()
+    try:
+        yield
+    finally:
+        SchwabParser.reset_journaled_shares()
 
 
 def test_missing_award_file_reports_the_vest_it_cannot_price() -> None:
@@ -547,3 +562,172 @@ def test_full_redemption_rejects_zero_quantity() -> None:
         _read(content)
 
     assert "FOO on 2023-01-15" in str(exc_info.value)
+
+
+# ── Journaled Shares (TRANSFER_FROM_SPOUSE) ───────────────────────────────────
+
+
+def test_journaled_shares_action_from_str() -> None:
+    """'Journaled Shares' maps to TRANSFER_FROM_SPOUSE."""
+    assert (
+        action_from_str("Journaled Shares", Path("transactions.csv"))
+        is ActionType.TRANSFER_FROM_SPOUSE
+    )
+
+
+def test_journaled_shares_without_base_cost_file_raises() -> None:
+    """A 'Journaled Shares' row without --schwab-journaled-shares-file raises a clear error."""
+    SchwabParser.journaled_shares = JournaledSharesBaseCosts(entries={})
+    content = (
+        SCHWAB_HEADER + "03/15/2024,Journaled Shares,FOO,JOURNALED SHARES,,40,,$0\n"
+    )
+    with pytest.raises(ParsingError, match="--schwab-journaled-shares-file"):
+        _read(content)
+
+
+def test_journaled_shares_with_price_in_csv_without_base_cost_file_raises() -> None:
+    """Even if Schwab puts a price in the CSV, a base cost file is still required."""
+    SchwabParser.journaled_shares = JournaledSharesBaseCosts(entries={})
+    content = (
+        SCHWAB_HEADER
+        + '03/15/2024,Journaled Shares,GOOG,ALPHABET INC,$306.93,318,,""\n'
+    )
+    with pytest.raises(ParsingError, match="--schwab-journaled-shares-file"):
+        _read(content)
+
+
+def test_journaled_shares_with_base_cost_becomes_transfer_from_spouse() -> None:
+    """A matched 'Journaled Shares' row gets TRANSFER_FROM_SPOUSE and the right price."""
+    SchwabParser.journaled_shares = JournaledSharesBaseCosts(
+        entries={(datetime.date(2024, 3, 15), "FOO"): [(Decimal(40), Decimal("25.00"))]}
+    )
+    content = (
+        SCHWAB_HEADER + "03/15/2024,Journaled Shares,FOO,JOURNALED SHARES,,40,,$0\n"
+    )
+    transactions = _read(content)
+
+    assert len(transactions) == 1
+    t = transactions[0]
+    assert t.action is ActionType.TRANSFER_FROM_SPOUSE
+    assert t.symbol == "FOO"
+    assert t.quantity == Decimal(40)
+    assert t.price == Decimal("25.00")
+
+
+def test_journaled_shares_overwrites_price_from_csv() -> None:
+    """The price from the base cost file replaces any price Schwab populated."""
+    SchwabParser.journaled_shares = JournaledSharesBaseCosts(
+        entries={
+            (datetime.date(2026, 3, 11), "GOOG"): [
+                (Decimal(318), Decimal("134.5494327470921383647798742"))
+            ]
+        }
+    )
+    content = (
+        SCHWAB_HEADER
+        + '03/11/2026,Journaled Shares,GOOG,ALPHABET INC,$306.93,318,,""\n'
+    )
+    transactions = _read(content)
+
+    assert len(transactions) == 1
+    t = transactions[0]
+    assert t.action is ActionType.TRANSFER_FROM_SPOUSE
+    assert t.symbol == "GOOG"
+    assert t.quantity == Decimal(318)
+    assert t.price == Decimal("134.5494327470921383647798742")
+
+
+def test_journaled_shares_quantity_mismatch_raises() -> None:
+    """A quantity mismatch between the CSV row and the base cost file raises clearly."""
+    SchwabParser.journaled_shares = JournaledSharesBaseCosts(
+        entries={
+            (datetime.date(2024, 3, 15), "FOO"): [
+                (Decimal(30), Decimal("25.00"))  # file says 30, CSV has 40
+            ]
+        }
+    )
+    content = (
+        SCHWAB_HEADER + "03/15/2024,Journaled Shares,FOO,JOURNALED SHARES,,40,,$0\n"
+    )
+    with pytest.raises(ParsingError, match="No matching entry"):
+        _read(content)
+
+
+def test_unmatched_journaled_file_entry_raises(tmp_path: Path) -> None:
+    """A base cost file entry with no matching CSV row is caught at finalize time."""
+    txn_file = tmp_path / "transactions.csv"
+    txn_file.write_text(
+        SCHWAB_HEADER + "03/15/2024,Buy,FOO,FOO INC,$25,40,$0,-$1000\n",
+        encoding="utf-8",
+    )
+    journal_file = tmp_path / "journal_base_costs.csv"
+    journal_file.write_text(
+        "Date,Type,Symbol,Quantity,BaseCostPerShare\n03/15/2024,TRANSFER_TO_SPOUSE,FOO,40,25.00\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ParsingError, match="no matching 'Journaled Shares' row"):
+        load_via_cli(
+            schwab_file=str(txn_file),
+            schwab_journaled_shares_file=str(journal_file),
+        )
+
+
+def test_journaled_shares_file_missing_type_column_raises(tmp_path: Path) -> None:
+    """A base cost file without the Type column raises a ParsingError."""
+    txn_file = tmp_path / "transactions.csv"
+    txn_file.write_text(
+        SCHWAB_HEADER + "03/15/2024,Journaled Shares,FOO,JOURNALED SHARES,,40,,$0\n",
+        encoding="utf-8",
+    )
+    journal_file = tmp_path / "journal_base_costs.csv"
+    journal_file.write_text(
+        "Date,Symbol,Quantity,BaseCostPerShare\n03/15/2024,FOO,40,25.00\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ParsingError, match="Missing columns in journaled shares file"):
+        load_via_cli(
+            schwab_file=str(txn_file),
+            schwab_journaled_shares_file=str(journal_file),
+        )
+
+
+def test_journaled_shares_file_unsupported_transfer_type_raises(tmp_path: Path) -> None:
+    """A base cost file with a non-spouse transfer type raises a ParsingError."""
+    txn_file = tmp_path / "transactions.csv"
+    txn_file.write_text(
+        SCHWAB_HEADER + "03/15/2024,Journaled Shares,FOO,JOURNALED SHARES,,40,,$0\n",
+        encoding="utf-8",
+    )
+    journal_file = tmp_path / "journal_base_costs.csv"
+    journal_file.write_text(
+        "Date,Type,Symbol,Quantity,BaseCostPerShare\n03/15/2024,TRANSFER,FOO,40,25.00\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ParsingError, match="Unsupported transfer type 'TRANSFER'"):
+        load_via_cli(
+            schwab_file=str(txn_file),
+            schwab_journaled_shares_file=str(journal_file),
+        )
+
+
+def test_run_with_schwab_journaled_shares(request: pytest.FixtureRequest) -> None:
+    """Journaled shares are acquired at their base cost for CGT purposes."""
+    cmd = build_cmd(
+        "--year",
+        "2024",
+        "--schwab-file",
+        "tests/schwab/data/journaled_shares/transactions.csv",
+        "--schwab-journaled-shares-file",
+        "tests/schwab/data/journaled_shares/journal_base_costs.csv",
+        "--output",
+        report_path(request),
+    )
+    result = run_cli(cmd)
+    assert stderr_alerts(result.stderr) == []
+    expected_file = (
+        Path("tests") / "schwab" / "data" / "journaled_shares" / "expected_output.txt"
+    )
+    assert_stdout_matches(result, cmd, expected_file)

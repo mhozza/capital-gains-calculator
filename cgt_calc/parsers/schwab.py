@@ -26,6 +26,7 @@ from cgt_calc.args_validators import (
 from cgt_calc.exceptions import (
     CgtError,
     ParsingError,
+    QuantityMissingError,
     SymbolMissingError,
     UnexpectedColumnCountError,
     UnexpectedRowCountError,
@@ -139,6 +140,131 @@ class AwardPrices:
         raise KeyError(f"Award price is not found for symbol {symbol} for date {date}")
 
 
+@dataclass
+class JournaledSharesBaseCosts:
+    """Base costs for 'Journaled Shares' rows from a spouse's Schwab account.
+
+    A journaled share transfer from a spouse arrives at the pool cost it left
+    with (TCGA 1992 s58). Schwab states the share count but not the price, so
+    the user supplies the base cost per share in a separate CSV file.
+    """
+
+    entries: dict[tuple[datetime.date, str], list[tuple[Decimal, Decimal]]]
+    """Keyed by (date, symbol); each value is a list of (quantity, base_cost_per_share) pairs.
+
+    A list supports the unusual case of two journaled transfers of the same
+    symbol on the same date; they are matched positionally (first CSV row,
+    first file entry after sorting by quantity then price).
+    """
+
+    def __bool__(self) -> bool:
+        """Return True if any unmatched entries remain."""
+        return bool(self.entries)
+
+    def pop_match(
+        self,
+        date: datetime.date,
+        symbol: str,
+        quantity: Decimal,
+        file: Path,
+    ) -> Decimal:
+        """Consume and return BaseCostPerShare for this date/symbol/quantity.
+
+        Raises ParsingError if no entry exists or the quantity does not match.
+        """
+        key = (date, current_ticker(symbol, date))
+        candidates = self.entries.get(key, [])
+        for i, (file_qty, price) in enumerate(candidates):
+            if file_qty == quantity:
+                candidates.pop(i)
+                if not candidates:
+                    del self.entries[key]
+                return price
+        raise ParsingError(
+            file,
+            f"No matching entry in --schwab-journaled-shares-file for "
+            f"'Journaled Shares' of {symbol} on {date} with quantity {quantity}. "
+            "Add a row to the file or check the date, symbol or quantity.",
+        )
+
+    def assert_all_consumed(self, journaled_file: Path) -> None:
+        """Raise if any file entries were never matched to a Schwab CSV row."""
+        remaining = [
+            f"  {date} {symbol} qty={qty}"
+            for (date, symbol), pairs in sorted(self.entries.items())
+            for qty, _ in pairs
+        ]
+        if remaining:
+            raise ParsingError(
+                journaled_file,
+                "The following --schwab-journaled-shares-file entries have no "
+                "matching 'Journaled Shares' row in the Schwab CSV:\n"
+                + "\n".join(remaining),
+            )
+
+
+def _load_journaled_shares_file(path: Path) -> JournaledSharesBaseCosts:
+    """Parse the --schwab-journaled-shares-file CSV.
+
+    Expected columns: Date (MM/DD/YYYY), Type, Symbol, Quantity, BaseCostPerShare.
+    """
+    required_columns = {"Date", "Type", "Symbol", "Quantity", "BaseCostPerShare"}
+    supported_spouse_transfer_types = {
+        ActionType.TRANSFER_TO_SPOUSE.name,
+        ActionType.TRANSFER_FROM_SPOUSE.name,
+        "GIFT_TO_SPOUSE",
+    }
+    entries: dict[tuple[datetime.date, str], list[tuple[Decimal, Decimal]]] = (
+        defaultdict(list)
+    )
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        header = set(reader.fieldnames or [])
+        missing = required_columns - header
+        if missing:
+            raise ParsingError(
+                path,
+                f"Missing columns in journaled shares file: {missing}. "
+                "Required columns: Date, Type, Symbol, Quantity, BaseCostPerShare",
+                row_index=1,
+            )
+        for row_index, row in enumerate(reader, start=2):
+            transfer_type = row["Type"].strip()
+            if transfer_type not in supported_spouse_transfer_types:
+                raise ParsingError(
+                    path,
+                    f"Unsupported transfer type {transfer_type!r} in journaled shares file. "
+                    "Only spouse transfers (TRANSFER_TO_SPOUSE) are currently supported.",
+                    row_index=row_index,
+                )
+            try:
+                date = datetime.datetime.strptime(
+                    row["Date"].strip(), "%m/%d/%Y"
+                ).date()
+            except ValueError as exc:
+                raise ParsingError(
+                    path,
+                    f"Invalid date format: {row['Date']!r}",
+                    row_index=row_index,
+                ) from exc
+            symbol = row["Symbol"].strip()
+            symbol = current_ticker(symbol, date)
+            try:
+                quantity = parse_decimal(row["Quantity"], "column 'Quantity'")
+            except ValueError as exc:
+                raise ParsingError(path, str(exc), row_index=row_index) from exc
+            try:
+                price = parse_decimal(
+                    row["BaseCostPerShare"],
+                    "column 'BaseCostPerShare'",
+                    strip="$,",
+                )
+            except ValueError as exc:
+                raise ParsingError(path, str(exc), row_index=row_index) from exc
+            entries[date, symbol].append((quantity, price))
+    return JournaledSharesBaseCosts(entries=dict(entries))
+
+
 def action_from_str(label: str, file: Path) -> ActionType:
     """Convert string label to ActionType."""
     if label == "Buy":
@@ -171,6 +297,12 @@ def action_from_str(label: str, file: Path) -> ActionType:
             "Only written equity options (Sell to Open followed by Buy to "
             "Close, Expired or Assigned) are currently supported.",
         )
+
+    if label == "Journaled Shares":
+        # Shares transferred from a spouse's account. The row states the
+        # quantity but not the price; the base cost is supplied via
+        # --schwab-journaled-shares-file and injected in SchwabTransaction.create().
+        return ActionType.TRANSFER_FROM_SPOUSE
 
     if label in {
         "MoneyLink Transfer",
@@ -359,9 +491,14 @@ class SchwabTransaction(BrokerTransaction):
 
     @staticmethod
     def create(
-        row_dict: OrderedDict[str, str], file: Path, awards_prices: AwardPrices
+        row_dict: OrderedDict[str, str],
+        file: Path,
+        awards_prices: AwardPrices,
+        journaled_shares: JournaledSharesBaseCosts | None = None,
     ) -> SchwabTransaction:
         """Create and post process a SchwabTransaction."""
+        if journaled_shares is None:
+            journaled_shares = JournaledSharesBaseCosts(entries={})
         transaction = SchwabTransaction(row_dict, file)
         if (
             transaction.price is None
@@ -408,6 +545,26 @@ class SchwabTransaction(BrokerTransaction):
                 raise ParsingError(
                     file, f"Cannot price a vest: {context}, and {reason}"
                 ) from err
+        elif (
+            transaction.action == ActionType.TRANSFER_FROM_SPOUSE
+            and transaction.raw_action == "Journaled Shares"
+        ):
+            symbol = transaction.symbol
+            quantity = transaction.quantity
+            if symbol is None:
+                raise SymbolMissingError(transaction)
+            if quantity is None:
+                raise QuantityMissingError(transaction)
+            if not journaled_shares:
+                raise ParsingError(
+                    file,
+                    f"'Journaled Shares' of {symbol} on {transaction.date} "
+                    "requires the spouse's base cost. Pass the base cost file with "
+                    "--schwab-journaled-shares-file.",
+                )
+            transaction.price = journaled_shares.pop_match(
+                transaction.date, symbol, quantity, file
+            )
         return transaction
 
 
@@ -998,6 +1155,8 @@ class SchwabParser(BaseSingleFileParser[BrokerTransaction]):
     glob_dir: ClassVar[str] = "*.csv"
 
     awards_prices: AwardPrices = AwardPrices(award_prices={})
+    journaled_shares: JournaledSharesBaseCosts = JournaledSharesBaseCosts(entries={})
+    _journaled_shares_file: ClassVar[Path | None] = None
 
     @classmethod
     @override
@@ -1048,6 +1207,18 @@ class SchwabParser(BaseSingleFileParser[BrokerTransaction]):
             ),
             shtab.DIRECTORY,
         )
+        set_completer(
+            arg_group.add_argument(
+                "--schwab-journaled-shares-file",
+                type=existing_file_or_stdin_type,
+                default=None,
+                metavar="PATH",
+                help="CSV file supplying base costs for Schwab 'Journaled Shares' "
+                "(shares transferred from a spouse's account); required columns: "
+                "Date (MM/DD/YYYY), Type, Symbol, Quantity, BaseCostPerShare",
+            ),
+            shtab.FILE,
+        )
         super().register_arguments(arg_group)
 
     @classmethod
@@ -1065,6 +1236,7 @@ class SchwabParser(BaseSingleFileParser[BrokerTransaction]):
                 "the directory holding every export, or the single file."
             )
         award_transactions = cls._load_award_file(args)
+        cls._load_journaled_shares(args)
         if args.schwab_dir:
             main_transactions = list(cls.load_from_dir(args.schwab_dir))
         else:
@@ -1174,6 +1346,27 @@ class SchwabParser(BaseSingleFileParser[BrokerTransaction]):
         return list(transactions)
 
     @classmethod
+    def reset_journaled_shares(cls) -> None:
+        """Reset journaled shares state between runs."""
+        cls.journaled_shares = JournaledSharesBaseCosts(entries={})
+        cls._journaled_shares_file = None
+
+    @classmethod
+    def _load_journaled_shares(cls, args: argparse.Namespace) -> None:
+        """Read --schwab-journaled-shares-file and store the base costs.
+
+        Resets class-level state so that a second run in the same process (e.g.
+        in tests) does not reuse costs from a previous invocation.
+        """
+        cls.reset_journaled_shares()
+        path: Path | None = getattr(args, "schwab_journaled_shares_file", None)
+        if path is None:
+            return
+        parsing_msg(path)
+        cls._journaled_shares_file = path
+        cls.journaled_shares = _load_journaled_shares_file(path)
+
+    @classmethod
     @override
     def finalize_transactions(
         cls, transactions: list[BrokerTransaction]
@@ -1187,6 +1380,11 @@ class SchwabParser(BaseSingleFileParser[BrokerTransaction]):
         read and stamped.
         """
         _reject_split_of_a_lapse_priced_symbol(transactions, cls.awards_prices)
+        if cls.journaled_shares and cls._journaled_shares_file is not None:
+            journaled_file = cls._journaled_shares_file
+            journaled_shares = cls.journaled_shares
+            cls.reset_journaled_shares()
+            journaled_shares.assert_all_consumed(journaled_file)
         return reconcile_written_options(
             [row for row in transactions if isinstance(row, SchwabTransaction)]
         )
@@ -1341,6 +1539,7 @@ class SchwabParser(BaseSingleFileParser[BrokerTransaction]):
                     OrderedDict(zip(header, row, strict=True)),
                     file_path,
                     cls.awards_prices,
+                    cls.journaled_shares,
                 )
             except ParsingError as err:
                 err.add_row_context(index)
