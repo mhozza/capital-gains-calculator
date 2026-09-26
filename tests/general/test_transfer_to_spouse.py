@@ -1917,3 +1917,127 @@ def _management_fee(date: datetime.date, symbol: str, amount: int) -> BrokerTran
         currency=CurrencyCode(GBP),
         broker="Testing",
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for the --gifts-to-spouse flag
+# ---------------------------------------------------------------------------
+
+
+def _unclassified_gift(
+    date: datetime.date, symbol: str, quantity: int
+) -> BrokerTransaction:
+    """Build a broker-reported gift row (UNCLASSIFIED_GIFT)."""
+    return BrokerTransaction(
+        date=date,
+        action=ActionType.UNCLASSIFIED_GIFT,
+        symbol=symbol,
+        description=f"gift of {symbol}",
+        quantity=Decimal(quantity),
+        price=None,
+        fees=Decimal(0),
+        amount=None,
+        currency=CurrencyCode(GBP),
+        broker="Testing",
+    )
+
+
+def test_gifts_to_spouse_flag_promotes_unclassified_gift_to_transfer() -> None:
+    """--gifts-to-spouse turns every unclassified broker gift into a transfer."""
+    buy_day = datetime.date(2024, 6, 1)
+    gift_day = datetime.date(2024, 6, 10)
+    calculator = create_calculator(
+        tax_year=2024, balance_check=False, gifts_to_spouse=True
+    )
+
+    report = get_report(
+        calculator,
+        [
+            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
+            _unclassified_gift(gift_day, "FOO", 4),
+        ],
+    )
+
+    # A transfer to a spouse is no gain/no loss and is not a taxable disposal.
+    assert report.total_gain() == Decimal(0)
+    assert report.disposal_count == 0
+    # Four units left the pool.
+    assert calculator.portfolio["FOO"].quantity == Decimal(6)
+    assert calculator.portfolio["FOO"].amount == Decimal(60)
+    # Logged exactly as a transfer to a spouse.
+    entries = report.calculation_log[gift_day]["transfer-to-spouse$FOO"]
+    assert all(e.rule_type is RuleType.TRANSFER_TO_SPOUSE for e in entries)
+    assert sum((e.gain for e in entries), Decimal(0)) == Decimal(0)
+    assert sum((e.allowable_cost for e in entries), Decimal(0)) == Decimal(40)
+
+
+def test_gifts_to_spouse_flag_without_any_unclassified_gifts_is_harmless() -> None:
+    """The flag has no effect when there are no broker gift rows."""
+    buy_day = datetime.date(2024, 6, 1)
+    sell_day = datetime.date(2024, 6, 10)
+    calculator = create_calculator(
+        tax_year=2024, balance_check=False, gifts_to_spouse=True
+    )
+
+    report = get_report(
+        calculator,
+        [
+            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
+            transaction(sell_day, ActionType.SELL, "FOO", 5, 20, 0, 100, CurrencyCode(GBP)),
+        ],
+    )
+
+    assert report.total_gain() == Decimal(50)
+    assert calculator.portfolio["FOO"].quantity == Decimal(5)
+
+
+def test_gifts_to_spouse_flag_explicit_row_still_wins() -> None:
+    """An explicit RAW TRANSFER_TO_SPOUSE row is still preferred over auto-promotion.
+
+    When the user has classified the gift manually the broker row is dropped as
+    usual and only the classifying row is processed -- the flag changes nothing.
+    """
+    buy_day = datetime.date(2024, 6, 1)
+    gift_day = datetime.date(2024, 6, 10)
+    calculator = create_calculator(
+        tax_year=2024, balance_check=False, gifts_to_spouse=True
+    )
+
+    report = get_report(
+        calculator,
+        [
+            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
+            _unclassified_gift(gift_day, "FOO", 4),
+            # Explicit classification: the broker row is dropped, this one runs.
+            transfer_to_spouse_transaction(gift_day, "FOO", 4),
+        ],
+    )
+
+    # Same result whether the flag is on or off: only four units leave, once.
+    assert report.total_gain() == Decimal(0)
+    assert calculator.portfolio["FOO"].quantity == Decimal(6)
+    assert calculator.portfolio["FOO"].amount == Decimal(60)
+
+
+def test_gifts_to_spouse_flag_multiple_gifts_all_promoted() -> None:
+    """Every unclassified gift on the same day and different symbols is promoted."""
+    buy_day = datetime.date(2024, 6, 1)
+    gift_day = datetime.date(2024, 6, 10)
+    calculator = create_calculator(
+        tax_year=2024, balance_check=False, gifts_to_spouse=True
+    )
+
+    report = get_report(
+        calculator,
+        [
+            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
+            transaction(buy_day, ActionType.BUY, "BAR", 20, 5, 0, -100, CurrencyCode(GBP)),
+            _unclassified_gift(gift_day, "FOO", 3),
+            _unclassified_gift(gift_day, "BAR", 8),
+        ],
+    )
+
+    assert report.total_gain() == Decimal(0)
+    assert report.disposal_count == 0
+    assert calculator.portfolio["FOO"].quantity == Decimal(7)
+    assert calculator.portfolio["BAR"].quantity == Decimal(12)
