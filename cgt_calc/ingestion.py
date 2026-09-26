@@ -298,6 +298,7 @@ class TransactionIngester:
         *,
         balance_check: bool,
         autoconvert_currency: bool = False,
+        gifts_to_spouse: bool = False,
         date_in_tax_year: Callable[[datetime.date], bool],
     ):
         """Create transaction ingester object."""
@@ -314,6 +315,7 @@ class TransactionIngester:
         self.interest_fund_tickers = interest_fund_tickers
         self.balance_check = balance_check
         self.autoconvert_currency = autoconvert_currency
+        self.gifts_to_spouse = gifts_to_spouse
         self.date_in_tax_year = date_in_tax_year
 
     def add_acquisition(
@@ -1198,6 +1200,12 @@ class TransactionIngester:
         ``TRANSFER_TO_SPOUSE``, ``GIFT`` or ``GIFT_UNCONNECTED`` row for the
         same date, symbol and quantity. That row carries everything needed, so
         the broker's own row is then redundant and is dropped here.
+
+        When ``self.gifts_to_spouse`` is set (``--gifts-to-spouse`` CLI flag),
+        any unclassified gift that has no matching RAW row is promoted to
+        ``TRANSFER_TO_SPOUSE`` in-place. An explicit RAW classification still
+        takes precedence: a user who has added some rows and turned the flag on
+        for the rest gets the expected result without any double-counting.
         """
         if not any(
             transaction.action is ActionType.UNCLASSIFIED_GIFT
@@ -1235,6 +1243,8 @@ class TransactionIngester:
             groups[transaction.date, transaction.symbol].append((index, readings))
 
         settled: set[int] = set()
+        # Indices of unclassified gifts to promote to TRANSFER_TO_SPOUSE.
+        auto_classified: set[int] = set()
         for (day, symbol), gifts in groups.items():
             available = Counter(
                 {
@@ -1248,6 +1258,18 @@ class TransactionIngester:
             # ones to blame.
             gifts.sort(key=lambda gift: len(gift[1]))
             if not _match_gifts_to_rows(gifts, available):
+                if self.gifts_to_spouse:
+                    # No explicit classification row matched. Promote every
+                    # unmatched gift in this group to TRANSFER_TO_SPOUSE.
+                    for index, _ in gifts:
+                        auto_classified.add(index)
+                        LOGGER.debug(
+                            "Gift of %s on %s promoted to TRANSFER_TO_SPOUSE "
+                            "by --gifts-to-spouse",
+                            symbol,
+                            day,
+                        )
+                    continue
                 # Walk the same order first come, first served to name the
                 # gift that is left without a row.
                 for index, readings in gifts:
@@ -1265,11 +1287,32 @@ class TransactionIngester:
                     symbol,
                     day,
                 )
-        return [
-            transaction
-            for index, transaction in enumerate(transactions)
-            if index not in settled
-        ]
+        result = []
+        for index, transaction in enumerate(transactions):
+            if index in settled:
+                continue
+            if index in auto_classified:
+                result.append(
+                    BrokerTransaction(
+                        date=transaction.date,
+                        action=ActionType.TRANSFER_TO_SPOUSE,
+                        symbol=transaction.symbol,
+                        description=transaction.description,
+                        quantity=transaction.quantity,
+                        price=transaction.price,
+                        fees=transaction.fees,
+                        amount=transaction.amount,
+                        currency=transaction.currency,
+                        broker=transaction.broker,
+                        isin=transaction.isin,
+                        foreign_fees=transaction.foreign_fees,
+                        ambiguous_quantity=transaction.ambiguous_quantity,
+                        source=transaction.source,
+                    )
+                )
+            else:
+                result.append(transaction)
+        return result
 
     def add_eri(
         self,
