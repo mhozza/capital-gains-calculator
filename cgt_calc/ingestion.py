@@ -388,6 +388,9 @@ class TransactionIngester:
             gbp_amount,
             self.currency_converter.to_gbp_for(transaction.fees, transaction)
             + capital_fee_adjustment,
+            original_currency=transaction.currency,
+            original_amount=amount - source_adjustment,
+            original_fees=transaction.fees,
         )
         record = day_acquisitions(
             self.history.acquisition_list, transaction.date, symbol
@@ -1063,6 +1066,8 @@ class TransactionIngester:
             quantity,
             Decimal(0),
             self.currency_converter.to_gbp_for(transaction.fees, transaction),
+            original_currency=transaction.currency,
+            original_fees=transaction.fees,
         )
 
     def add_gift(

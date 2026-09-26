@@ -118,6 +118,8 @@ class EventView:
     loss_to_date: Decimal | None = None
     gift_loss_to_date: Decimal | None = None
     base_cost_passed: Decimal | None = None
+    original_currency: str | None = None
+    original_base_cost_passed: Decimal | None = None
     eri_unit_price: Decimal | None = None
     renamed_to: str | None = None
     split: StockSplitDetail | None = None
@@ -406,10 +408,29 @@ def _with_kind_fields(
             replace(event, split=entries[0].stock_split), entries[0]
         )
     if kind is EventKind.TRANSFER_TO_SPOUSE:
+        original_currency = None
+        original_base_cost_passed = None
+        if all(e.original_currency is not None for e in entries):
+            currencies = {e.original_currency for e in entries}
+            if len(currencies) == 1 and "GBP" not in currencies:
+                original_currency = str(next(iter(currencies)))
+                original_base_cost_passed = round_decimal(
+                    sum(
+                        (
+                            e.original_allowable_cost
+                            for e in entries
+                            if e.original_allowable_cost is not None
+                        ),
+                        Decimal(0),
+                    ),
+                    2,
+                )
         return _with_pool_after(
             replace(
                 event,
                 base_cost_passed=round_decimal(_total(entries, "allowable_cost"), 2),
+                original_currency=original_currency,
+                original_base_cost_passed=original_base_cost_passed,
             ),
             entries[-1],
         )

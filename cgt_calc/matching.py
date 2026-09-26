@@ -15,6 +15,7 @@ from .exceptions import CalculationError
 from .model import (
     CalculationEntry,
     CalculationLog,
+    CurrencyCode,
     ExcessReportedIncome,
     ExcessReportedIncomeDistribution,
     HmrcTransactionData,
@@ -89,6 +90,8 @@ class DisposalContext:
     current_amount: Decimal
     chargeable_gain: Decimal
     calculation_entries: list[CalculationEntry]
+    current_original_amount: Decimal = Decimal(0)
+    current_original_currency: CurrencyCode | None = None
 
     def take_share(self, units: Decimal) -> tuple[Decimal, Decimal]:
         """Take `units` out of what is left to match, with their proceeds and fees.
@@ -302,9 +305,17 @@ class Matcher:
                     eris=bnb_acquisition.eris,
                 )
             )
+        orig_amount = (
+            acquisition.original_amount
+            - (bnb_acquisition.original_amount or Decimal(0))
+            if acquisition.original_amount is not None
+            else Decimal(0)
+        )
         self.run.portfolio[symbol] += Position(
             acquisition.quantity,
             modified_amount,
+            original_amount=orig_amount,
+            original_currency=acquisition.original_currency,
         )
         # A fee's cost goes into the pool whatever became of the day's shares,
         # so it is stated even when a 30-day claim has taken every one of them.
@@ -378,6 +389,8 @@ class Matcher:
             current_amount=pool.amount,
             chargeable_gain=Decimal(0),
             calculation_entries=[],
+            current_original_amount=pool.original_amount,
+            current_original_currency=pool.original_currency,
         )
         # What there is to identify the disposal against: the Section 104 pool
         # the holding keeps under one name, and the day's purchases of it,
@@ -394,7 +407,10 @@ class Matcher:
             f"disposal quantity {ctx.disposal_quantity}"
         )
         self.run.portfolio[ctx.identity.pool_name] = Position(
-            ctx.current_quantity, normalize_amount(ctx.current_amount)
+            ctx.current_quantity,
+            normalize_amount(ctx.current_amount),
+            normalize_amount(ctx.current_original_amount),
+            ctx.current_original_currency,
         )
         ctx.chargeable_gain = round_decimal(ctx.chargeable_gain, 2)
         return ctx.chargeable_gain, ctx.calculation_entries
@@ -459,6 +475,22 @@ class Matcher:
                     (available_quantity * same_day_acquisition.amount)
                     / same_day_acquisition.quantity
                 )
+                orig_fees = (
+                    (ctx.disposal.original_fees or Decimal(0))
+                    * available_quantity
+                    / ctx.disposal.quantity
+                )
+                orig_acq_cost = (
+                    normalize_amount(
+                        (available_quantity * same_day_acquisition.original_amount)
+                        / same_day_acquisition.quantity
+                    )
+                    if same_day_acquisition.original_amount is not None
+                    else None
+                )
+                orig_allowable_cost = (
+                    orig_acq_cost + orig_fees if orig_acq_cost is not None else None
+                )
 
                 acquisition_price = acquisition_cost / available_quantity
                 # No gain/no loss: deemed proceeds equal the allowable cost.
@@ -487,9 +519,14 @@ class Matcher:
                     # cost: a management fee's stays behind, pooled with no
                     # shares, as it is when charged after a holding is sold.
                     ctx.current_amount -= acquisition_cost
+                    if orig_acq_cost is not None:
+                        ctx.current_original_amount -= orig_acq_cost
                 else:
                     self.run.portfolio[ctx.cost_holder] -= Position(
-                        available_quantity, acquisition_cost
+                        available_quantity,
+                        acquisition_cost,
+                        original_amount=orig_acq_cost or Decimal(0),
+                        original_currency=same_day_acquisition.original_currency,
                     )
                 ctx.calculation_entries.append(
                     CalculationEntry(
@@ -505,6 +542,8 @@ class Matcher:
                         fees=fees,
                         new_quantity=ctx.current_quantity,
                         new_pool_cost=ctx.current_amount,
+                        original_currency=same_day_acquisition.original_currency,
+                        original_allowable_cost=orig_allowable_cost,
                     )
                 )
 
@@ -748,6 +787,31 @@ class Matcher:
                         assert round_decimal(ctx.current_amount, 23) == 0, (
                             f"current amount {ctx.current_amount}"
                         )
+                    orig_fees = (
+                        (ctx.disposal.original_fees or Decimal(0))
+                        * available_quantity
+                        / ctx.disposal.quantity
+                    )
+                    orig_bnb_cost = (
+                        normalize_amount(
+                            (consumed_acquisition_units * acquisition.original_amount)
+                            / acquisition.quantity
+                        )
+                        if acquisition.original_amount is not None
+                        else None
+                    )
+                    orig_allowable_cost = (
+                        orig_bnb_cost + orig_fees if orig_bnb_cost is not None else None
+                    )
+                    orig_amount_delta = (
+                        normalize_amount(
+                            (available_quantity * ctx.current_original_amount)
+                            / ctx.current_quantity
+                        )
+                        if ctx.current_original_amount and ctx.current_quantity > 0
+                        else Decimal(0)
+                    )
+                    ctx.current_original_amount -= orig_amount_delta
                     add_to_list(
                         self.run.bnb_list,
                         search_index,
@@ -756,6 +820,9 @@ class Matcher:
                         amount_delta + total_dist_amount,
                         Decimal(0),
                         eris,
+                        original_currency=acquisition.original_currency,
+                        original_amount=orig_amount_delta,
+                        original_fees=Decimal(0),
                     )
                     ctx.calculation_entries.append(
                         CalculationEntry(
@@ -772,6 +839,8 @@ class Matcher:
                             bed_and_breakfast_date_index=search_index,
                             new_quantity=ctx.current_quantity,
                             new_pool_cost=ctx.current_amount,
+                            original_currency=acquisition.original_currency,
+                            original_allowable_cost=orig_allowable_cost,
                         )
                     )
                     # If we completely matched the current disposal,
@@ -788,6 +857,24 @@ class Matcher:
             # Multiply by available_quantity before divide to avoid rounding errors from division
             amount_delta = normalize_amount(
                 (available_quantity * ctx.current_amount) / ctx.current_quantity
+            )
+            orig_fees = (
+                (ctx.disposal.original_fees or Decimal(0))
+                * available_quantity
+                / ctx.disposal.quantity
+            )
+            orig_amount_delta = (
+                normalize_amount(
+                    (available_quantity * ctx.current_original_amount)
+                    / ctx.current_quantity
+                )
+                if ctx.current_original_amount and ctx.current_quantity > 0
+                else Decimal(0)
+            )
+            orig_allowable_cost = (
+                orig_amount_delta + orig_fees
+                if ctx.current_original_currency is not None
+                else None
             )
 
             # No gain/no loss: deemed proceeds equal the allowable cost.
@@ -806,6 +893,7 @@ class Matcher:
             )
             ctx.current_quantity -= available_quantity
             ctx.current_amount -= amount_delta
+            ctx.current_original_amount -= orig_amount_delta
             if ctx.current_quantity == 0:
                 assert round_decimal(ctx.current_amount, 10) == 0, (
                     f"current amount {ctx.current_amount}"
@@ -824,6 +912,8 @@ class Matcher:
                     fees=fees,
                     new_quantity=ctx.current_quantity,
                     new_pool_cost=ctx.current_amount,
+                    original_currency=ctx.current_original_currency,
+                    original_allowable_cost=orig_allowable_cost,
                 )
             )
 

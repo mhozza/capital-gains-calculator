@@ -162,14 +162,44 @@ class HmrcTransactionData:
     # ERI reports for the same fund. This can happen for example when a fund is
     # liquidated shortly after its usual reporting date, requiring a new final report.
     eris: list[ExcessReportedIncome] = field(default_factory=list)
+    original_currency: CurrencyCode | None = None
+    original_amount: Decimal | None = None
+    original_fees: Decimal | None = None
 
     def __add__(self, transaction: HmrcTransactionData) -> HmrcTransactionData:
         """Add two transactions."""
+        orig_curr = None
+        orig_amt = None
+        orig_fees = None
+        if self.quantity == 0 and not self.amount:
+            orig_curr = transaction.original_currency
+            orig_amt = transaction.original_amount
+            orig_fees = transaction.original_fees
+        elif transaction.quantity == 0 and not transaction.amount:
+            orig_curr = self.original_currency
+            orig_amt = self.original_amount
+            orig_fees = self.original_fees
+        elif self.original_currency == transaction.original_currency:
+            orig_curr = self.original_currency
+            if (
+                self.original_amount is not None
+                or transaction.original_amount is not None
+            ):
+                orig_amt = (self.original_amount or Decimal(0)) + (
+                    transaction.original_amount or Decimal(0)
+                )
+            if self.original_fees is not None or transaction.original_fees is not None:
+                orig_fees = (self.original_fees or Decimal(0)) + (
+                    transaction.original_fees or Decimal(0)
+                )
         return self.__class__(
             self.quantity + transaction.quantity,
             self.amount + transaction.amount,
             self.fees + transaction.fees,
             self.eris + transaction.eris,
+            original_currency=orig_curr,
+            original_amount=orig_amt,
+            original_fees=orig_fees,
         )
 
 
@@ -645,6 +675,8 @@ class CalculationEntry:
         eris: list[ExcessReportedIncome] | None = None,
         renamed_to: str | None = None,
         stock_split: StockSplitDetail | None = None,
+        original_currency: CurrencyCode | None = None,
+        original_allowable_cost: Decimal | None = None,
     ):
         """Create calculation entry."""
         self.rule_type = rule_type
@@ -663,6 +695,8 @@ class CalculationEntry:
         self.eris = eris or []
         self.renamed_to = renamed_to
         self.stock_split = stock_split
+        self.original_currency = original_currency
+        self.original_allowable_cost = original_allowable_cost
         if self.rule_type == RuleType.EXCESS_REPORTED_INCOME:
             assert self.allowable_cost > 0, str(self)
             assert approx_equal(
@@ -717,19 +751,43 @@ class Position:
 
     quantity: Decimal = Decimal(0)
     amount: Decimal = Decimal(0)
+    original_amount: Decimal = field(default=Decimal(0), compare=False)
+    original_currency: CurrencyCode | None = field(default=None, compare=False)
 
     def __add__(self, other: Position) -> Position:
         """Add two positions."""
+        orig_curr = None
+        orig_amt = Decimal(0)
+        if self.quantity == 0 and not self.amount:
+            orig_curr = other.original_currency
+            orig_amt = other.original_amount
+        elif other.quantity == 0 and not other.amount:
+            orig_curr = self.original_currency
+            orig_amt = self.original_amount
+        elif self.original_currency == other.original_currency:
+            orig_curr = self.original_currency
+            orig_amt = normalize_amount(self.original_amount + other.original_amount)
+
         return Position(
             self.quantity + other.quantity,
             normalize_amount(self.amount + other.amount),
+            orig_amt,
+            orig_curr,
         )
 
     def __sub__(self, other: Position) -> Position:
         """Subtract two positions."""
+        new_quantity = self.quantity - other.quantity
+        new_orig_amount = (
+            Decimal(0)
+            if new_quantity == 0
+            else normalize_amount(self.original_amount - other.original_amount)
+        )
         return Position(
-            self.quantity - other.quantity,
+            new_quantity,
             normalize_amount(self.amount - other.amount),
+            new_orig_amount,
+            self.original_currency,
         )
 
     @override

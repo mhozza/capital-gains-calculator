@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .model import (
+    CurrencyCode,
     DayAcquisitions,
     ExcessReportedIncome,
     HmrcTransactionData,
@@ -49,10 +50,19 @@ def add_to_list(
     amount: Decimal,
     fees: Decimal,
     eris: list[ExcessReportedIncome] | None = None,
+    original_currency: CurrencyCode | None = None,
+    original_amount: Decimal | None = None,
+    original_fees: Decimal | None = None,
 ) -> None:
     """Add entry to given transaction log."""
     current_list.setdefault(date_index, {})
     current_list[date_index].setdefault(symbol, HmrcTransactionData())
     current_list[date_index][symbol] += HmrcTransactionData(
-        quantity=quantity, amount=amount, fees=fees, eris=eris or []
+        quantity=quantity,
+        amount=amount,
+        fees=fees,
+        eris=eris or [],
+        original_currency=original_currency,
+        original_amount=original_amount,
+        original_fees=original_fees,
     )

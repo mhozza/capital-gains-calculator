@@ -34,6 +34,7 @@ from cgt_calc.spin_off_handler import SpinOffHandler
 
 from .calc_test_data import (
     GBP,
+    USD,
     split_transaction,
     transaction,
     transfer_to_spouse_transaction,
@@ -397,6 +398,28 @@ def test_transfer_to_spouse_shown_in_report() -> None:
     # Quantities are shown as entered, like the PDF, so fractions survive.
     assert f"{transfer_day}: FOO 400 units, base cost £4,000.00" in output
     assert "2024-06-10,TRANSFER_FROM_SPOUSE,FOO,400,10,0.00,GBP" in output
+
+
+def test_transfer_to_spouse_shown_in_report_with_original_currency() -> None:
+    """The text report lists transfers with original currency base cost when non-GBP."""
+    buy_day = datetime.date(2024, 6, 8)
+    transfer_day = datetime.date(2024, 6, 10)
+    calculator = create_calculator(tax_year=2024, balance_check=False)
+    # Rate on 2024-06-08 is 1.2709 USD per GBP
+    report = get_report(
+        calculator,
+        [
+            transaction(
+                buy_day, ActionType.BUY, "FOO", 1000, 10, 0, -10000, CurrencyCode(USD)
+            ),
+            transfer_to_spouse_transaction(transfer_day, "FOO", 400),
+        ],
+    )
+
+    output = render_text(report)
+    assert "Transferred to spouse" in output
+    assert f"{transfer_day}: FOO 400 units, base cost £3,147.38 ($4,000.00)" in output
+    assert "2024-06-10,TRANSFER_FROM_SPOUSE,FOO,400,7.86843968840975,0.00,GBP" in output
 
 
 def test_unclassified_gift_is_rejected_with_instructions() -> None:
@@ -1953,7 +1976,9 @@ def test_gifts_to_spouse_flag_promotes_unclassified_gift_to_transfer() -> None:
     report = get_report(
         calculator,
         [
-            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
+            transaction(
+                buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)
+            ),
             _unclassified_gift(gift_day, "FOO", 4),
         ],
     )
@@ -1982,8 +2007,12 @@ def test_gifts_to_spouse_flag_without_any_unclassified_gifts_is_harmless() -> No
     report = get_report(
         calculator,
         [
-            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
-            transaction(sell_day, ActionType.SELL, "FOO", 5, 20, 0, 100, CurrencyCode(GBP)),
+            transaction(
+                buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)
+            ),
+            transaction(
+                sell_day, ActionType.SELL, "FOO", 5, 20, 0, 100, CurrencyCode(GBP)
+            ),
         ],
     )
 
@@ -2006,7 +2035,9 @@ def test_gifts_to_spouse_flag_explicit_row_still_wins() -> None:
     report = get_report(
         calculator,
         [
-            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
+            transaction(
+                buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)
+            ),
             _unclassified_gift(gift_day, "FOO", 4),
             # Explicit classification: the broker row is dropped, this one runs.
             transfer_to_spouse_transaction(gift_day, "FOO", 4),
@@ -2030,8 +2061,12 @@ def test_gifts_to_spouse_flag_multiple_gifts_all_promoted() -> None:
     report = get_report(
         calculator,
         [
-            transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
-            transaction(buy_day, ActionType.BUY, "BAR", 20, 5, 0, -100, CurrencyCode(GBP)),
+            transaction(
+                buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)
+            ),
+            transaction(
+                buy_day, ActionType.BUY, "BAR", 20, 5, 0, -100, CurrencyCode(GBP)
+            ),
             _unclassified_gift(gift_day, "FOO", 3),
             _unclassified_gift(gift_day, "BAR", 8),
         ],

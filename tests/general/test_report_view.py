@@ -16,6 +16,7 @@ from cgt_calc.exceptions import CalculationError
 from cgt_calc.model import (
     CalculationEntry,
     CapitalGainsReport,
+    CurrencyCode,
     Dividend,
     ExcessReportedIncome,
     RuleType,
@@ -50,6 +51,8 @@ def _entry(
     dividend: Dividend | None = None,
     eris: list[ExcessReportedIncome] | None = None,
     renamed_to: str | None = None,
+    original_currency: CurrencyCode | None = None,
+    original_allowable_cost: Decimal | None = None,
 ) -> CalculationEntry:
     """Build a calculation entry from strings, so the decimals stay exact."""
     return CalculationEntry(
@@ -66,6 +69,8 @@ def _entry(
         dividend=dividend,
         eris=eris,
         renamed_to=renamed_to,
+        original_currency=original_currency,
+        original_allowable_cost=original_allowable_cost,
     )
 
 
@@ -314,6 +319,25 @@ def test_a_pool_emptied_by_the_event_has_no_price_per_unit() -> None:
     )
     assert event.pool_quantity == 0
     assert event.pool_per_unit is None
+
+
+def test_transfer_to_spouse_event_view_original_currency() -> None:
+    """Original currency and base cost are included on transfer to spouse event view."""
+    (event,) = _events(
+        {
+            "transfer-to-spouse$FOO": [
+                _entry(
+                    rule_type=RuleType.TRANSFER_TO_SPOUSE,
+                    allowable_cost="3147.38",
+                    original_currency=CurrencyCode("USD"),
+                    original_allowable_cost=Decimal("4000.00"),
+                )
+            ]
+        }
+    )
+    assert event.base_cost_passed == Decimal("3147.38")
+    assert event.original_currency == "USD"
+    assert event.original_base_cost_passed == Decimal("4000.00")
 
 
 def test_excess_reported_income_prices_a_unit_to_four_places() -> None:

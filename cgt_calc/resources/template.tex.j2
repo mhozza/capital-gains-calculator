@@ -96,7 +96,7 @@ Units in the pool at this point in the day: \VAR{ strip_zeros(event.pool_quantit
 \subsubsection*{
     Transferred to spouse: \VAR{ strip_zeros(event.quantity) } units of \VAR{ event.symbol } (no gain/no loss)
 }
-Base cost of £\VAR{ event.base_cost_passed|money } passes to the recipient.
+Base cost of £\VAR{ event.base_cost_passed|money }\BLOCK{ if event.original_base_cost_passed is not none }\BLOCK{ if event.original_currency == "USD" } (\$\VAR{ event.original_base_cost_passed|money })\BLOCK{ elif event.original_currency == "EUR" } (€\VAR{ event.original_base_cost_passed|money })\BLOCK{ else } (\VAR{ event.original_currency } \VAR{ event.original_base_cost_passed|money })\BLOCK{ endif }\BLOCK{ endif } passes to the recipient.
 
 Number of units left in the pool: \VAR{ strip_zeros(event.pool_quantity) }%
     \BLOCK{ if event.pool_quantity > 0 },

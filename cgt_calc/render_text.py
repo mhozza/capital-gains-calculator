@@ -458,9 +458,28 @@ def _render_spouse_transfers(report: CapitalGainsReport) -> str:
         symbol = key[len(transfer_prefix) :]
         quantity = sum((e.quantity for e in entry_list), Decimal(0))
         base_cost = sum((e.allowable_cost for e in entry_list), Decimal(0))
+        orig_str = ""
+        if all(e.original_currency is not None for e in entry_list):
+            currencies = {e.original_currency for e in entry_list}
+            if len(currencies) == 1 and "GBP" not in currencies:
+                orig_curr = next(iter(currencies))
+                orig_cost = sum(
+                    (
+                        e.original_allowable_cost
+                        for e in entry_list
+                        if e.original_allowable_cost is not None
+                    ),
+                    Decimal(0),
+                )
+                if orig_curr == "USD":
+                    orig_str = f" (${round_decimal(orig_cost, 2):,})"
+                elif orig_curr == "EUR":
+                    orig_str = f" (€{round_decimal(orig_cost, 2):,})"
+                else:
+                    orig_str = f" ({orig_curr} {round_decimal(orig_cost, 2):,})"
         out += (
             f"{bul}{date_index}: {symbol} "
-            f"{strip_zeros(quantity)} units, base cost {_pounds(base_cost)}\n"
+            f"{strip_zeros(quantity)} units, base cost {_pounds(base_cost)}{orig_str}\n"
             f"    {date_index},TRANSFER_FROM_SPOUSE,{symbol},"
             f"{exact_str(quantity)},{exact_str(base_cost / quantity)},"
             "0.00,GBP\n"
