@@ -30,6 +30,7 @@ from cgt_calc.exceptions import (
     QuantityMissingError,
     QuantityNotPositiveError,
     SharePriceMissingError,
+    SpouseTransferExportError,
     SymbolMissingError,
     TransactionDumpError,
     UnclassifiedGiftError,
@@ -148,6 +149,10 @@ CONTEXT_CASES: list[tuple[CgtError, list[str]]] = [
     (
         TransactionDumpError("parsed.csv already exists"),
         ["parsed.csv already exists"],
+    ),
+    (
+        SpouseTransferExportError("journal.csv already exists"),
+        ["journal.csv already exists"],
     ),
     (
         ExternalApiError("https://api.example.com/rates", "boom"),

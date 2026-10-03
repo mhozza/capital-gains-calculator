@@ -401,6 +401,15 @@ class TransactionDumpError(CgtError):
         super().__init__(self.message)
 
 
+class SpouseTransferExportError(CgtError):
+    """Raised when the spouse transfer export CSV cannot be written."""
+
+    def __init__(self, message: str):
+        """Initialise."""
+        self.message = message
+        super().__init__(self.message)
+
+
 class IsinTranslationError(CgtError):
     """Raised when invalid ISIN translation data is encountered."""
 

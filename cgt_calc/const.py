@@ -343,3 +343,6 @@ DEFAULT_SPIN_OFF_FILE: Final = DEFAULT_OUTPUT_FOLDER / "spin_offs.csv"
 
 # ISIN to ticker translation file
 DEFAULT_ISIN_TRANSLATION_FILE: Final = DEFAULT_OUTPUT_FOLDER / "isin_translation.csv"
+
+# Default exported transfers file
+DEFAULT_TRANSFERS_FILE: Final = DEFAULT_OUTPUT_FOLDER / "transfers.csv"

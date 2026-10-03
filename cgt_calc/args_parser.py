@@ -26,6 +26,7 @@ from .const import (
     DEFAULT_ISIN_TRANSLATION_FILE,
     DEFAULT_REPORT_PATH,
     DEFAULT_SPIN_OFF_FILE,
+    DEFAULT_TRANSFERS_FILE,
     EARLIEST_TAX_YEAR,
 )
 from .dates import get_tax_year_end, get_tax_year_for_date, get_tax_year_start
@@ -253,6 +254,19 @@ Documentation: https://cgt-calc.uk/
             metavar="PATH",
             default=None,
             help="write parsed transactions as CSV to a new file, then continue calculating",
+        ),
+        shtab.FILE,
+    )
+    set_completer(
+        output_group.add_argument(
+            "--export-transfers-file",
+            type=output_path_type,
+            metavar="PATH",
+            default=None,
+            help=(
+                "write transfers to spouse as CSV in Schwab 'Journaled Shares' "
+                f"base cost format (default: {DEFAULT_TRANSFERS_FILE})"
+            ),
         ),
         shtab.FILE,
     )
