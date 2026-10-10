@@ -577,9 +577,9 @@ def _split_chronology_message(
     """Explain why a same-day row cannot be placed around a reorganisation.
 
     Times the export does state are not always enough, so the reason has
-    to say which of the two situations this is. Telling someone whose
-    export already states its times to supply times would send them
-    looking for a file that does not exist.
+    to say which situation this is. Telling someone whose export already
+    states its times to supply times would send them looking for a file
+    that does not exist.
     """
     preamble = (
         f"Cannot apply the reorganisation of {symbol} on {date_index}: "
@@ -588,8 +588,8 @@ def _split_chronology_message(
         f"units before or after:\n{indent_entry(other)}\n"
         f"The reorganisation is:\n{indent_entry(row)}\n"
     )
-    stated = other.source is not None and other.source.timestamp is not None
-    if len(instants) == 1 and stated:
+    stamp = None if other.source is None else other.source.timestamp
+    if len(instants) == 1 and stamp is not None:
         return preamble + (
             "Both rows state their times, but the reorganisation is a "
             "single row, and the instant on it is when the broker booked "
@@ -599,12 +599,21 @@ def _split_chronology_message(
             "booked after that row is in the new units; this row was not. "
             "Work the day out by hand (consider professional advice)."
         )
+    if len(instants) > 1 and stamp is not None:
+        return preamble + (
+            f"This row is stamped {stamp}, at or between the two halves of "
+            f"the reorganisation at {min(instants)} and {max(instants)}. If "
+            f"you know the real order, move the day's {symbol} rows out of "
+            "their exports into one RAW input in that order, with the "
+            "reorganisation as one STOCK_SPLIT row stating the change to the "
+            "whole holding; otherwise work the day out by hand (consider "
+            "professional advice)."
+        )
     return preamble + (
         "The two come from different inputs, or from an export that gives "
-        "neither times nor a documented order, or the row falls at or "
-        "between the two halves of the reorganisation. Run again with the "
-        f"day's {symbol} rows in one input that states times, or work the "
-        "day out by hand (consider professional advice)."
+        "neither times nor a documented order. Run again with the day's "
+        f"{symbol} rows in one input that states times, or work the day out "
+        "by hand (consider professional advice)."
     )
 
 
