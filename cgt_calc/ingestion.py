@@ -1192,7 +1192,7 @@ class TransactionIngester:
         self,
         transactions: list[BrokerTransaction],
     ) -> list[BrokerTransaction]:
-        """Drop broker-reported gifts the user has classified, refuse the rest.
+        """Drop broker-reported gifts the user classified; promote or refuse the rest.
 
         A gift to a spouse or civil partner is no gain/no loss; a gift to
         anyone else is a disposal at market value. Broker exports record only
@@ -1201,11 +1201,14 @@ class TransactionIngester:
         same date, symbol and quantity. That row carries everything needed, so
         the broker's own row is then redundant and is dropped here.
 
-        When ``self.gifts_to_spouse`` is set (``--gifts-to-spouse`` CLI flag),
-        any unclassified gift that has no matching RAW row is promoted to
-        ``TRANSFER_TO_SPOUSE`` in-place. An explicit RAW classification still
-        takes precedence: a user who has added some rows and turned the flag on
-        for the rest gets the expected result without any double-counting.
+        ``--gifts-to-spouse`` says who received the gifts and nothing more. A
+        gift left without a row then becomes a ``TRANSFER_TO_SPOUSE`` in place,
+        while a gift that a row accounts for is still dropped, so neither
+        leaves the pool twice. The option cannot say how many shares left, so
+        two refusals stay: a gift that could state either of two counts, and
+        a gift left without a row on a day when a row for the same symbol is
+        left without a gift, which is more likely that gift's count typed
+        wrongly than a second transfer.
         """
         if not any(
             transaction.action is ActionType.UNCLASSIFIED_GIFT
@@ -1224,6 +1227,10 @@ class TransactionIngester:
                 ActionType.GIFT_UNCONNECTED,
             }
         )
+        # Every classifying row of a day and symbol, whatever count it states.
+        rows_on_day: Counter[tuple[datetime.date, str | None]] = Counter()
+        for (day, symbol, _), count in classified.items():
+            rows_on_day[day, symbol] += count
         # Gifts of one symbol on one day all draw on the same rows, and a gift
         # printed before a split can state either of two counts, so which row
         # each takes has to be settled for the day as a whole.
@@ -1257,33 +1264,44 @@ class TransactionIngester:
             # they prune the search, and when nothing fits they are the right
             # ones to blame.
             gifts.sort(key=lambda gift: len(gift[1]))
-            if not _match_gifts_to_rows(gifts, available):
-                if self.gifts_to_spouse:
-                    # No explicit classification row matched. Promote every
-                    # unmatched gift in this group to TRANSFER_TO_SPOUSE.
-                    for index, _ in gifts:
-                        auto_classified.add(index)
-                        LOGGER.debug(
-                            "Gift of %s on %s promoted to TRANSFER_TO_SPOUSE "
-                            "by --gifts-to-spouse",
-                            symbol,
-                            day,
-                        )
-                    continue
-                # Walk the same order first come, first served to name the
-                # gift that is left without a row.
-                for index, readings in gifts:
-                    taken = next((r for r in readings if available[r] > 0), None)
-                    if taken is None:
-                        raise UnclassifiedGiftError(transactions[index], readings)
+            if _match_gifts_to_rows(gifts, available):
+                for index, _ in gifts:
+                    settled.add(index)
+                    LOGGER.debug(
+                        "Gift of %s on %s is accounted for by a classifying row",
+                        symbol,
+                        day,
+                    )
+                continue
+            # Walk the same order first come, first served to name the gift
+            # that is left without a row. With --gifts-to-spouse a gift of one
+            # possible count is not refused for that: it waits to be promoted.
+            unused_rows = rows_on_day[day, symbol]
+            without_row: list[tuple[int, list[Decimal]]] = []
+            for index, readings in gifts:
+                taken = next((r for r in readings if available[r] > 0), None)
+                if taken is not None:
                     available[taken] -= 1
+                    unused_rows -= 1
+                    settled.add(index)
+                elif self.gifts_to_spouse and len(readings) == 1:
+                    without_row.append((index, readings))
+                else:
+                    raise UnclassifiedGiftError(transactions[index], readings)
+            if not without_row:
                 # That order is one the search already rejected, so it cannot
                 # have placed every gift.
                 raise AssertionError("every gift found a row after all")
-            for index, _ in gifts:
-                settled.add(index)
+            if unused_rows:
+                # A row for this day and symbol is left without a gift while a
+                # gift has no row, so they disagree about how many shares left.
+                index, readings = without_row[0]
+                raise UnclassifiedGiftError(transactions[index], readings)
+            for index, _ in without_row:
+                auto_classified.add(index)
                 LOGGER.debug(
-                    "Gift of %s on %s is accounted for by a classifying row",
+                    "Gift of %s on %s promoted to TRANSFER_TO_SPOUSE "
+                    "by --gifts-to-spouse",
                     symbol,
                     day,
                 )
