@@ -1992,30 +1992,6 @@ def test_gifts_to_spouse_flag_promotes_unclassified_gift_to_transfer() -> None:
     assert sum((e.allowable_cost for e in entries), Decimal(0)) == Decimal(40)
 
 
-def test_gifts_to_spouse_flag_without_any_unclassified_gifts_is_harmless() -> None:
-    """The flag has no effect when there are no broker gift rows."""
-    buy_day = datetime.date(2024, 6, 1)
-    sell_day = datetime.date(2024, 6, 10)
-    calculator = create_calculator(
-        tax_year=2024, balance_check=False, gifts_to_spouse=True
-    )
-
-    report = get_report(
-        calculator,
-        [
-            transaction(
-                buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)
-            ),
-            transaction(
-                sell_day, ActionType.SELL, "FOO", 5, 20, 0, 100, CurrencyCode(GBP)
-            ),
-        ],
-    )
-
-    assert report.total_gain() == Decimal(50)
-    assert calculator.portfolio["FOO"].quantity == Decimal(5)
-
-
 def test_gifts_to_spouse_flag_explicit_row_still_wins() -> None:
     """An explicit RAW TRANSFER_TO_SPOUSE row is still preferred over auto-promotion.
 
@@ -2117,3 +2093,27 @@ def test_gifts_to_spouse_flag_promotes_only_the_gifts_without_a_row() -> None:
     entries = report.calculation_log[gift_day]["transfer-to-spouse$FOO"]
     assert sum((e.quantity for e in entries), Decimal(0)) == Decimal(17)
     assert sum((e.allowable_cost for e in entries), Decimal(0)) == Decimal("173.40")
+
+
+def test_gifts_to_spouse_flag_leaves_the_rows_it_was_given_unclassified() -> None:
+    """The option converts a copy, so the row it was given stays an unclassified gift.
+
+    Given to a second calculator built without the option, the same rows stop
+    on that gift as they would on their own.
+    """
+    buy_day = datetime.date(2024, 6, 1)
+    gift_day = datetime.date(2024, 6, 10)
+    rows = [
+        transaction(buy_day, ActionType.BUY, "FOO", 10, 10, 0, -100, CurrencyCode(GBP)),
+        _unclassified_gift(gift_day, "FOO", 4),
+    ]
+    with_option = create_calculator(
+        tax_year=2024, balance_check=False, gifts_to_spouse=True
+    )
+    get_report(with_option, rows)
+
+    without_option = create_calculator(tax_year=2024, balance_check=False)
+    with pytest.raises(
+        UnclassifiedGiftError, match="a gift of 4 units of FOO on 2024-06-10"
+    ):
+        get_report(without_option, rows)

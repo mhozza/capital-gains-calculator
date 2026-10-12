@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import copy
 from dataclasses import dataclass
 from decimal import Decimal
 import logging
@@ -1202,8 +1203,8 @@ class TransactionIngester:
         the broker's own row is then redundant and is dropped here.
 
         ``--gifts-to-spouse`` says who received the gifts and nothing more. A
-        gift left without a row then becomes a ``TRANSFER_TO_SPOUSE`` in place,
-        while a gift that a row accounts for is still dropped, so neither
+        gift left without a row then becomes a ``TRANSFER_TO_SPOUSE`` where it
+        stood, while a gift that a row accounts for is still dropped, so neither
         leaves the pool twice. The option cannot say how many shares left, so
         two refusals stay: a gift that could state either of two counts, and
         a gift left without a row on a day when a row for the same symbol is
@@ -1310,24 +1311,11 @@ class TransactionIngester:
             if index in settled:
                 continue
             if index in auto_classified:
-                result.append(
-                    BrokerTransaction(
-                        date=transaction.date,
-                        action=ActionType.TRANSFER_TO_SPOUSE,
-                        symbol=transaction.symbol,
-                        description=transaction.description,
-                        quantity=transaction.quantity,
-                        price=transaction.price,
-                        fees=transaction.fees,
-                        amount=transaction.amount,
-                        currency=transaction.currency,
-                        broker=transaction.broker,
-                        isin=transaction.isin,
-                        foreign_fees=transaction.foreign_fees,
-                        ambiguous_quantity=transaction.ambiguous_quantity,
-                        source=transaction.source,
-                    )
-                )
+                # A copy keeps every field the broker's row carries, and
+                # leaves the caller's own row an unclassified gift.
+                transfer = copy.copy(transaction)
+                transfer.action = ActionType.TRANSFER_TO_SPOUSE
+                result.append(transfer)
             else:
                 result.append(transaction)
         return result
